@@ -1,3 +1,5 @@
+venv/
+__pycache__/
+*.pyc
 .env
 client_secret.json
-venv/
