@@ -110,28 +110,38 @@ def protected_area():
 
     results = service.users().messages().list(
         userId='me',
-        maxResults=5
+        maxResults=10
     ).execute()
 
+ 
+    
     messages = results.get('messages', [])
     emails = []
+    for message in messages:
+        msg = service.users().messages().get(userId="me", id=message["id"]).execute()
+        email_data = msg["payload"]["headers"]
+        
+        
+        from_name = next((v["value"] for v in email_data if v["name"] == "From"), "Unknown")
+        subject = next((v["value"] for v in email_data if v["name"] == "Subject"), "No Subject")
 
-    for msg in messages:
-        message = service.users().messages().get(
-            userId='me',
-            id=msg['id'],
-            format='raw'
-        ).execute()
+        # Handles nesting
+        body = ""
+        parts = msg["payload"].get("parts", [])
+        
+        if not parts:
+            body_data = msg["payload"].get("body", {}).get("data", "")
+            if body_data:
+                body = base64.urlsafe_b64decode(body_data).decode("utf-8")
+        else:
+            for p in parts:
+                if p["mimeType"] == "text/plain": 
+                    body = base64.urlsafe_b64decode(p["body"]["data"]).decode("utf-8")
+                    break 
 
-        raw_data = base64.urlsafe_b64decode(message['raw'])
-        email_text = raw_data.decode('utf-8', errors='ignore')
+        emails.append(f"<div><strong>From:</strong> {from_name} <br> <strong>Subject:</strong> {subject} <br> {body[:100]}...</div><hr>")
 
-        emails.append(email_text[:1000])  # truncate for sanity
-
-    return {
-        "user": session["name"],
-        "emails": emails
-    }
+    return "<h1>Your Last 10 Emails</h1>" + "".join(emails)
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
