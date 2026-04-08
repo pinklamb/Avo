@@ -1,6 +1,8 @@
 import os
 import pathlib
-
+import base64
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 import requests
 from dotenv import load_dotenv
 from flask import Flask, session, abort, redirect, request
@@ -20,9 +22,25 @@ client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret
 
 flow = Flow.from_client_secrets_file(
     client_secrets_file=client_secrets_file,
-    scopes=["https://www.googleapis.com/auth/userinfo.profile","https://www.googleapis.com/auth/userinfo.email", "openid"],
+    scopes = [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/gmail.readonly"
+    ],
     redirect_uri="http://localhost:5000/callback"
 )
+
+
+def credentials_dict(creds):
+    return {
+        'token': creds.token,
+        'refresh_token': creds.refresh_token,
+        'token_uri': creds.token_uri,
+        'client_id': creds.client_id,
+        'client_secret': creds.client_secret,
+        'scopes': creds.scopes
+    }
 
 
 def login_is_required(function):
@@ -50,6 +68,7 @@ def callback():
         abort(500)  # State does not match!
 
     credentials = flow.credentials
+    session['credentials'] = credentials_dict(credentials)
     request_session = requests.session()
     cached_session = cachecontrol.CacheControl(request_session)
     token_request = google.auth.transport.requests.Request(session=cached_session)
@@ -66,6 +85,9 @@ def callback():
     return redirect("/protected_area")
 
 
+
+
+
 @app.route("/logout")
 def logout():
     session.clear()
@@ -80,8 +102,36 @@ def index():
 @app.route("/protected_area")
 @login_is_required
 def protected_area():
-    return f"Hello {session['name']}! <br/> <a href='/logout'><button>Logout</button></a>"
+    if 'credentials' not in session:
+        return abort(401)
 
+    creds = Credentials(**session['credentials'])
+    service = build('gmail', 'v1', credentials=creds)
+
+    results = service.users().messages().list(
+        userId='me',
+        maxResults=5
+    ).execute()
+
+    messages = results.get('messages', [])
+    emails = []
+
+    for msg in messages:
+        message = service.users().messages().get(
+            userId='me',
+            id=msg['id'],
+            format='raw'
+        ).execute()
+
+        raw_data = base64.urlsafe_b64decode(message['raw'])
+        email_text = raw_data.decode('utf-8', errors='ignore')
+
+        emails.append(email_text[:1000])  # truncate for sanity
+
+    return {
+        "user": session["name"],
+        "emails": emails
+    }
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
