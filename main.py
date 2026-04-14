@@ -2,6 +2,7 @@ import os
 import pathlib
 import base64
 import re
+import time
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 import requests
@@ -70,30 +71,35 @@ def get_body(payload):
 
 
 
-
 def find_email_matches(body, subject, keywords):
+    if not keywords:
+        return []
 
-    pattern = re.compile(rf"\b({"|".join(map(re.escape, keywords))})\b", re.IGNORECASE)
+    pattern = re.compile(
+        rf"({'|'.join(map(re.escape, keywords))})",
+        re.IGNORECASE
+    )
 
-    return pattern.findall(body) + pattern.findall(subject)
+    matches = []
+    for text in [subject, body]:
+        matches.extend([m.group().lower() for m in pattern.finditer(text)])
 
-
-def search_inbox(raw_messages, service):
+    return matches
     
-    keywords = ["the"]
+def search_inbox(raw_messages, service):
     found_emails = []
-    for message in raw_messages:
-        
-        msg = service.users().messages().get(userId="me", id=message["id"]).execute()
-        headers = msg["payload"]["headers"]
-        
-        from_name = next((v["value"] for v in headers if v["name"] == "From"), "Unknown")
+    keywords = ["will begin","doordash","nyt"]
+
+    def batch_email(request_id, response, exception):
+        if exception:
+            print(f"Error: {exception}")
+            return
+
+        headers = response.get("payload", {}).get("headers", [])
         subject = next((v["value"] for v in headers if v["name"] == "Subject"), "No Subject")
+        from_name = next((v["value"] for v in headers if v["name"] == "From"), "Unknown")
         
-        
-        body = get_body(msg["payload"])
-        
-        
+        body = get_body(response["payload"])
         matches = find_email_matches(body, subject, keywords)
 
         if matches:
@@ -103,10 +109,19 @@ def search_inbox(raw_messages, service):
                 "body_content": body,
                 "matches": matches
             })
-            
+
+    batch_size = 20 
+
+    for i in range(0, len(raw_messages), batch_size):
+        batch = service.new_batch_http_request(callback=batch_email)
+    
+        current_chunk = raw_messages[i : i + batch_size]
+        for msg in current_chunk:
+            batch.add(service.users().messages().get(userId="me", id=msg["id"]))
+    
+        batch.execute() 
+        time.sleep(0.3)
     return found_emails
-
-
 
 
 def render_email_html(email_data):
@@ -128,22 +143,38 @@ def render_email_html(email_data):
 @app.route("/protected_area")
 @login_is_required
 def protected_area():
-    
     creds = Credentials(**session["credentials"])
     service = build("gmail", "v1", credentials=creds)
     
-    query = "newer_than:365d delivered"
+    query = "newer_than:90d"
+    all_raw_messages = []
+    next_page_token = None
 
-    results = service.users().messages().list(userId="me", maxResults=500, q=query).execute()
-    raw_messages = results.get("messages", [])
+    while True:
+        results = service.users().messages().list(
+            userId="me", 
+            q=query, 
+            maxResults=500, 
+            pageToken=next_page_token
+        ).execute()
 
-    matched_emails = search_inbox(raw_messages, service)
+        messages = results.get("messages", [])
+        all_raw_messages.extend(messages)
+
+       
+        next_page_token = results.get("nextPageToken")
+       
+        if not next_page_token:
+            break
+    matched_emails = search_inbox(all_raw_messages, service)
 
     email_blocks = [render_email_html(e) for e in matched_emails]
     if not email_blocks:
         return "<h1>No relevant emails found.</h1>"
 
     return f"<h1>Found {len(email_blocks)} Results</h1>" + " ".join(email_blocks)
+
+
 
 @app.route("/login")
 def login():
