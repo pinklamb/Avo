@@ -70,7 +70,6 @@ def get_body(payload):
     return ""
 
 
-
 def find_email_matches(body, subject, keywords):
     if not keywords:
         return []
@@ -80,16 +79,23 @@ def find_email_matches(body, subject, keywords):
         re.IGNORECASE
     )
 
-    matches = []
+    found_keywords = set()
     for text in [subject, body]:
-        matches.extend([m.group().lower() for m in pattern.finditer(text)])
+        found_keywords.update(m.group().lower() for m in pattern.finditer(text))
+    #or maybe add checker here to validate emails before sending to search inbox
+    if found_keywords:
+        return {
+            "keywords": list(found_keywords),
+            "date": find_date(body),
+            "amt": find_amount(body)
+        }
 
-    return matches
+    return None
     
 def search_inbox(raw_messages, service):
     found_emails = []
-    keywords = ["will begin","doordash","nyt"]
-
+    keywords = ["trial", "subscription", "charge", "payment due", "payment"]
+    
     def batch_email(request_id, response, exception):
         if exception:
             print(f"Error: {exception}")
@@ -100,16 +106,17 @@ def search_inbox(raw_messages, service):
         from_name = next((v["value"] for v in headers if v["name"] == "From"), "Unknown")
         
         body = get_body(response["payload"])
-        matches = find_email_matches(body, subject, keywords)
+        
+        match_data = find_email_matches(body, subject, keywords)
+        # next sprint go through matched emails and double check amt + date are valid before adding
 
-        if matches:
+        if match_data:
             found_emails.append({
                 "from": from_name,
                 "subject": subject,
                 "body_content": body,
-                "matches": matches
+                "match_details": match_data  
             })
-
     batch_size = 20 
 
     for i in range(0, len(raw_messages), batch_size):
@@ -120,24 +127,78 @@ def search_inbox(raw_messages, service):
             batch.add(service.users().messages().get(userId="me", id=msg["id"]))
     
         batch.execute() 
-        time.sleep(0.3)
+        time.sleep(0.5)
     return found_emails
 
 
-def render_email_html(email_data):
-    unique_matches = ", ".join(set(email_data['matches']))
-    count = len(email_data['matches'])
+def find_date(text):
+    date_pattern = r"""
+        (?:\d{1,4}[-./]\d{1,2}[-./]\d{1,4})|                 
+        (?:\d{1,2}(?:st|nd|rd|th)?\s+)?                       
+        (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)   
+        [a-z]*\.?                                            
+        (?:\s+\d{1,2}(?:st|nd|rd|th)?)?                        
+        (?:,?\s+\d{2,4})?                              
+    """
     
+    matches = re.findall(date_pattern, text, re.IGNORECASE | re.VERBOSE)
+    if matches:
+        return matches[0].strip()
+    
+    return "No date found."
+
+
+
+
+def find_amount(text):
+    patterns = [
+        r'(?:Total|Plan|Amount|Due|Balance|Price|USD)\s*:?\s?\$?\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+        r'\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s?(?:USD)?',
+        r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s?USD',
+        r'([0-9]+\.[0-9][0-9](?:[^0-9]\b|$))'
+    ]
+
+    all_matches = []
+    for p in patterns:
+        matches = re.findall(p, text, re.IGNORECASE)
+        for m in matches:
+            val = (m.replace(',', ''))
+            all_matches.append(val)
+
+    if all_matches:
+        return max(all_matches)
+    
+    return "Could not get amount due."
+    
+
+
+
+
+
+
+
+def render_email_html(email_data):
+    details = email_data.get('match_details', {})
+    
+    keywords = details.get('keywords', [])
+    date = details.get('date', "No date found.")
+    amt = details.get('amt', "Could not get amount due.")
+    
+    unique_matches = ", ".join(keywords)
+    count = len(keywords)
+
+
+    amt_display = f"${amt:,.2f}" if isinstance(amt, (int, float)) else amt
+
     return (
-        f"<div style='margin-bottom: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px;'>"
+        f"<div style='margin-bottom: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px; font-family: sans-serif;'>"
         f"  <span style='color: #006400;'><strong>Matched:</strong> {unique_matches} ({count})</span><br>"
         f"  <strong>From:</strong> {email_data['from']}<br>"
         f"  <strong>Subject:</strong> {email_data['subject']}<br>"
-        f"  <p style='color: #666;'>{email_data['body_content'][:150]}...</p>"
+        f"  <span style='color: #666;'><strong>Due Date:</strong> {date}</span><br>"
+        f"  <strong style='color: #d9534f;'>Amount Due:$ </strong> {amt_display}"
         f"</div>"
     )
-
-
 
 
 @app.route("/protected_area")
@@ -146,7 +207,7 @@ def protected_area():
     creds = Credentials(**session["credentials"])
     service = build("gmail", "v1", credentials=creds)
     
-    query = "newer_than:90d"
+    query = "newer_than:60d"
     all_raw_messages = []
     next_page_token = None
 
@@ -154,7 +215,7 @@ def protected_area():
         results = service.users().messages().list(
             userId="me", 
             q=query, 
-            maxResults=500, 
+            maxResults=100, 
             pageToken=next_page_token
         ).execute()
 
